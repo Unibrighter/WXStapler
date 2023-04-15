@@ -14,34 +14,37 @@ def response(flow: http.HTTPFlow) -> None:
     if "https://mp.weixin.qq.com/mp/profile_ext?action=getmsg" in flow.request.pretty_url:
         global articles
         
-        # TODO: fix the bug for repeating tracking some of the traffic as the original traffic will be double requested!
-
-
-        # Parse the response JSON and extract the 'has_next' field
         response_json = json.loads(flow.response.text)
         has_next = response_json['can_msg_continue']
-
-        # Extract the articles from the response JSON and add them to the global list
-        santinised_json_raw = response_json['general_msg_list'].replace("\/", "/")
-        new_articles = json.loads(santinised_json_raw)['list']
-        articles += flat_records_from(new_articles)
+        needs_replay = has_next or not flow.is_replay 
 
         # Modify the query parameters for the next request
         query_params = dict(flow.request.query.fields)
+        updated_params = query_params.copy()
 
-        offset = int(query_params.get('offset', '0')) if flow.is_replay else 0
-        count = int(query_params.get('count', '10'))
-        query_params['offset'] = str(offset + count) if flow.is_replay else offset
+        # template, no need to handle the response yet
+        if not flow.is_replay: 
+            template_flow = flow.copy()
+            updated_params['offset'] = 0
 
-        replay_flow = flow.copy()
-        replay_flow.request.query.fields = list(query_params.items())
+        # start adding new articles; modify parameters for next replay
+        else: 
+            santinised_json_raw = response_json['general_msg_list'].replace("\/", "/")
+            new_articles = json.loads(santinised_json_raw)['list']
+            articles += flat_records_from(new_articles)
 
-        # Replay the request every 2 seconds while 'has_next' is true
-        if has_next:
+            offset = int(query_params.get('offset', '0'))
+            count = int(query_params.get('count', '10'))
+            updated_params['offset'] = str(offset + count)
+
+        # Replay the request every 2 seconds if needed
+        if needs_replay:
+            replay_flow = flow.copy()
+            replay_flow.request.query.fields = list(updated_params.items())
             time.sleep(2)
             ctx.master.commands.call("replay.client", [replay_flow])
 
-        # Stop intercepting traffic once 'has_next' is false
+        # Stop intercepting traffic once no longer needed
         else:
             with open('articles.json', 'w', encoding='utf8') as f:
                 json.dump(articles, f, ensure_ascii=False)
